@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 const DEFINE_BLOCK_COMMAND: &str = "def-block";
 const DEFINE_PARAMS_COMMAND: &str = "def-params";
 const ENABLE_EXPORT_COMMAND: &str = "export";
@@ -57,15 +55,15 @@ impl Block {
                 Component::Attribute(attr) => match attr {
                     Attribute::Name(n) => match name {
                         None => name = Some(n),
-                        Some(_) => return Err("multiple names defined".into()),
+                        Some(_) => return Err("Multiple names defined".into()),
                     },
                     Attribute::Export(e) => match export {
                         None => export = Some(e),
-                        Some(_) => return Err("multiple exports defined".into()),
+                        Some(_) => return Err("Multiple exports defined".into()),
                     },
                     Attribute::Value(v) => match values.contains(&v) {
                         false => values.push(v),
-                        true => return Err(format!("duplicate value defined: {}", v)),
+                        true => return Err(format!("Duplicate value defined: {}", v)),
                     },
                 },
                 Component::Element(e) => elements.push(e),
@@ -79,7 +77,10 @@ impl Block {
                 values,
                 elements,
             }),
-            None => Err("missing required name attribute".into()),
+            None => Err(format!(
+                "Missing required '{}' command",
+                DEFINE_BLOCK_COMMAND
+            )),
         }
     }
 }
@@ -89,9 +90,10 @@ enum ParserState {
     CommandFlag,
     Command,
     SkipNewline,
+    CancelledFlag,
     InvalidCommand(String),
 }
-impl FromStr for Block {
+impl std::str::FromStr for Block {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -195,7 +197,7 @@ impl FromStr for Block {
                 },
                 ParserState::CommandFlag => match c {
                     '{' => close_content(&mut buffer, &mut components),
-                    '!' => push_to_state(&mut buffer, c, ParserState::CommandFlag),
+                    '!' => push_to_state(&mut buffer, c, ParserState::CancelledFlag),
                     _ => push_to_state(&mut buffer, c, ParserState::Content),
                 },
                 ParserState::Command => match c {
@@ -206,11 +208,16 @@ impl FromStr for Block {
                     '\n' => ParserState::Content,
                     _ => push_to_state(&mut buffer, c, ParserState::Content),
                 },
+                ParserState::CancelledFlag => match c {
+                    '!' => push_to_state(&mut buffer, c, ParserState::CancelledFlag),
+                    _ => push_to_state(&mut buffer, c, ParserState::Content),
+                },
                 ParserState::InvalidCommand(reason) => {
                     return Err(format!("Invalid command: {}", reason));
                 }
             };
         }
+        close_content(&mut buffer, &mut components);
 
         Block::validate(components)
     }
