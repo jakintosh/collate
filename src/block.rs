@@ -1,8 +1,9 @@
+use std::collections::HashMap;
+
 const DEFINE_BLOCK_COMMAND: &str = "def-block";
 const DEFINE_PARAMS_COMMAND: &str = "def-params";
 const ENABLE_EXPORT_COMMAND: &str = "export";
 const USE_BLOCK_COMMAND: &str = "use-block";
-const USE_VALUE_COMMAND: &str = "use-param";
 
 #[derive(Clone)]
 pub(crate) struct Block {
@@ -34,17 +35,11 @@ pub(crate) enum Element {
     Content(String),
     UseBlock {
         block_name: Argument,
-        parameters: Vec<Argument>,
-    },
-    UseValue {
-        value_name: Argument,
+        parameters: Option<Vec<Argument>>,
     },
 }
 
 impl Block {
-    pub(crate) fn is_exported(&self) -> bool {
-        self.export.is_some()
-    }
     pub(crate) fn validate(components: Vec<Component>) -> Result<Block, String> {
         let mut name = None;
         let mut export = None;
@@ -82,6 +77,75 @@ impl Block {
                 DEFINE_BLOCK_COMMAND
             )),
         }
+    }
+    pub(crate) fn render(&self, library: &HashMap<String, Block>) -> Result<String, String> {
+        self.render_with_params(library, None)
+    }
+    fn render_with_params(
+        &self,
+        library: &HashMap<String, Block>,
+        params: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        fn build_params(
+            values: Vec<String>,
+            params: Vec<String>,
+        ) -> Result<HashMap<String, String>, String> {
+            match values.len() == params.len() {
+                true => {
+                    let zip = values.into_iter().zip(params.into_iter());
+                    let params = HashMap::from_iter(zip);
+                    Ok(params)
+                }
+                false => Err(format!(
+                    "Expected {} parameter, received {}",
+                    values.len(),
+                    params.len()
+                )),
+            }
+        }
+        fn evaluate(arg: &Argument, params: &HashMap<String, String>) -> Result<String, String> {
+            match arg {
+                Argument::Literal(s) => Ok(s.to_owned()),
+                Argument::Value(name) => match params.get(name) {
+                    Some(value) => Ok(value.clone()),
+                    None => Err(format!("Value named {} does not exist", name)),
+                },
+            }
+        }
+
+        let params = match params {
+            Some(p) => build_params(self.values.clone(), p)?,
+            None => HashMap::new(),
+        };
+        let mut buffer = String::new();
+        for element in &self.elements {
+            let s = match element {
+                Element::Content(c) => c.to_owned(),
+                Element::UseBlock {
+                    block_name,
+                    parameters,
+                } => {
+                    let block_name = evaluate(block_name, &params)?;
+                    let block = match library.get(&block_name) {
+                        Some(b) => b,
+                        None => return Err(format!("Using unregisterd block '{}'", block_name)),
+                    };
+                    let parameters: Option<Vec<String>> = match parameters {
+                        Some(p) => {
+                            let evaluated_params: Result<Vec<String>, String> =
+                                p.iter().map(|p| evaluate(p, &params)).collect();
+                            Some(evaluated_params?)
+                        }
+                        None => None,
+                    };
+
+                    block.render_with_params(library, parameters)?
+                }
+            };
+            buffer.push_str(&s);
+        }
+
+        Ok(buffer)
     }
 }
 
@@ -128,22 +192,18 @@ impl std::str::FromStr for Block {
                 USE_BLOCK_COMMAND => {
                     let block_name = argument_from_str(commands[1]);
                     let parameters = match commands.len() {
-                        len if len > 2 => commands[2..]
-                            .iter()
-                            .map(|p| argument_from_str(*p))
-                            .collect(),
-                        _ => Vec::new(),
+                        len if len > 2 => Some(
+                            commands[2..]
+                                .iter()
+                                .map(|p| argument_from_str(*p))
+                                .collect(),
+                        ),
+                        _ => None,
                     };
                     let element = Element::UseBlock {
                         block_name,
                         parameters,
                     };
-                    let component = Component::Element(element);
-                    Ok(vec![component])
-                }
-                USE_VALUE_COMMAND => {
-                    let value_name = argument_from_str(commands[1]);
-                    let element = Element::UseValue { value_name };
                     let component = Component::Element(element);
                     Ok(vec![component])
                 }

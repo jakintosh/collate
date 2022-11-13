@@ -3,60 +3,66 @@ use std::{collections::HashMap, path::PathBuf};
 
 mod block;
 
-fn main() -> Result<(), ()> {
-    let Parameters { source, output } = match parse_args() {
-        Some(p) => p,
-        None => panic!("Incorrect arguments."),
-    };
+fn main() -> Result<(), String> {
+    let Parameters { source, output } = parse_args()?;
 
-    let mut exports = HashMap::new();
     let mut library = HashMap::new();
-    for path in get_filepaths_recursive(source.into()) {
-        let file = read_file(&path)?;
-        let block = parse_block(&path, file)?;
-        register_block(&path, &mut library, &mut exports, block)?;
+    let mut exports = HashMap::new();
+    for path in get_filepaths_recursive(source) {
+        parse_block_and_register(&path, &mut library, &mut exports)?;
+    }
+    for (block_name, file_path) in exports {
+        let block = library.get(&block_name).expect("library/export mismatch");
+        let render = block.render(&library)?;
+        let path = build_path(&output, &file_path);
+        std::fs::write(&path, &render).map_err(|e| format!("{}: {}", block_name, e))?;
+        println!(
+            "Exported block '{}' ({}B) to '{}'",
+            &block_name,
+            render.as_bytes().len(),
+            path.to_string_lossy()
+        );
     }
 
     Ok(())
 }
 
-fn read_file(path: &PathBuf) -> Result<String, ()> {
-    std::fs::read_to_string(path.clone())
-        .map_err(|_| println!("'{}': Couldn't read file", path_to_str(&path)))
+fn build_path(base: &PathBuf, append: &PathBuf) -> PathBuf {
+    let mut path = base.clone();
+    path.push(append);
+    path
 }
 
-fn parse_block(path: &PathBuf, file: String) -> Result<Block, ()> {
-    file.parse()
-        .map_err(|e| println!("'{}': {}", path_to_str(&path), e))
-}
-
-fn register_block(
+fn parse_block_and_register(
     path: &PathBuf,
     library: &mut HashMap<String, Block>,
-    exports: &mut HashMap<String, Block>,
-    block: Block,
-) -> Result<(), ()> {
-    let name = block.name.clone();
-    match library.contains_key(&name) {
-        true => {
-            println!("'{}': Duplicate block name ({})", path_to_str(&path), name);
-            Err(())
-        }
-        false => {
-            if block.is_exported() {
-                exports.insert(name.clone(), block.clone());
-            }
-            library.insert(name.clone(), block);
-            Ok(())
-        }
-    }
-}
-
-fn path_to_str(path: &PathBuf) -> &str {
-    match path.to_str() {
+    exports: &mut HashMap<String, PathBuf>,
+) -> Result<(), String> {
+    let display_path = match path.to_str() {
         Some(s) => s,
         None => "<invalid path>",
-    }
+    };
+    let file = match std::fs::read_to_string(&path) {
+        Ok(f) => f,
+        Err(e) => return Err(format!("'{}': {}", display_path, e)),
+    };
+    let block = match file.parse::<Block>() {
+        Ok(b) => b,
+        Err(e) => return Err(format!("'{}': {}", display_path, e)),
+    };
+    let result = match library.contains_key(&block.name) {
+        true => Err(format!("'{}': Name taken '{}'", display_path, &block.name)),
+        false => {
+            if let Some(export) = &block.export {
+                exports.insert(block.name.clone(), export.into());
+            }
+            library.insert(block.name.clone(), block);
+
+            Ok(())
+        }
+    };
+
+    result
 }
 
 fn get_filepaths_recursive(dir: PathBuf) -> Vec<PathBuf> {
@@ -82,19 +88,41 @@ fn get_filepaths_recursive(dir: PathBuf) -> Vec<PathBuf> {
 }
 
 struct Parameters {
-    source: String,
-    output: String,
+    source: PathBuf,
+    output: PathBuf,
 }
 
-fn parse_args() -> Option<Parameters> {
+fn parse_args() -> Result<Parameters, String> {
+    fn parse_arg(args: &mut std::env::Args, token: String) -> Option<(String, String)> {
+        match token.split('=').collect::<Vec<_>>() {
+            subtokens if subtokens.len() == 2 => Some((subtokens[0].into(), subtokens[1].into())),
+            _ => Some((token, args.next()?)),
+        }
+    }
+    fn map_arg(
+        map: &HashMap<String, String>,
+        short: &str,
+        long: &str,
+        default: Result<String, String>,
+    ) -> Result<String, String> {
+        if map.contains_key(short) {
+            Ok(map[short].clone())
+        } else if map.contains_key(long) {
+            Ok(map[long].clone())
+        } else {
+            default
+        }
+    }
+
     let mut args = std::env::args();
-    let mut map: HashMap<String, String> = HashMap::new();
     args.next(); // skip first arg, bin location
+
+    let mut map: HashMap<String, String> = HashMap::new();
     while let Some(arg) = args.next() {
         let token = {
             if let Some(t) = arg.strip_prefix("--") {
                 String::from(t)
-            } else if let Some(t) = arg.strip_prefix("--") {
+            } else if let Some(t) = arg.strip_prefix("-") {
                 String::from(t)
             } else {
                 arg
@@ -106,37 +134,8 @@ fn parse_args() -> Option<Parameters> {
         }
     }
 
-    let source = {
-        if map.contains_key("s") {
-            map["s"].clone()
-        } else if map.contains_key("source") {
-            map["source"].clone()
-        } else {
-            String::from(".")
-        }
-    };
+    let source = map_arg(&map, "s", "source", Ok(".".into()))?.into();
+    let output = map_arg(&map, "o", "output", Err("--output param missing".into()))?.into();
 
-    let output = {
-        if map.contains_key("o") {
-            map["o"].clone()
-        } else if map.contains_key("output") {
-            map["output"].clone()
-        } else {
-            return None;
-        }
-    };
-
-    Some(Parameters { source, output })
-}
-
-fn parse_arg(args: &mut std::env::Args, token: String) -> Option<(String, String)> {
-    if token.contains("=") {
-        let subtokens: Vec<&str> = token.split("=").collect();
-        if subtokens.len() == 2 {
-            return Some((String::from(subtokens[0]), String::from(subtokens[1])));
-        }
-    }
-
-    let value = args.next()?;
-    Some((token, value))
+    Ok(Parameters { source, output })
 }
