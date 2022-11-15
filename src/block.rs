@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 
-const DEFINE_BLOCK_COMMAND: &str = "def-block";
-const DEFINE_PARAMS_COMMAND: &str = "def-params";
-const ENABLE_EXPORT_COMMAND: &str = "export";
-const USE_BLOCK_COMMAND: &str = "use-block";
+const COMMAND_FLAG: char = '^';
+const COMMAND_START: char = '|';
+const COMMAND_END: char = '|';
+
+const NEW_BLOCK_COMMAND: &str = "n";
+const DEFINE_PARAMS_COMMAND: &str = "p";
+const ENABLE_EXPORT_COMMAND: &str = "x";
+const USE_BLOCK_COMMAND: &str = "u";
+const END_BLOCK_COMMAND: &str = "e";
 
 #[derive(Clone)]
 pub(crate) struct Block {
@@ -14,12 +19,13 @@ pub(crate) struct Block {
 }
 
 pub(crate) enum Component {
+    Open { name: String },
     Attribute(Attribute),
     Element(Element),
+    Close,
 }
 
 pub(crate) enum Attribute {
-    Name(String),
     Export(String),
     Value(String),
 }
@@ -40,18 +46,169 @@ pub(crate) enum Element {
 }
 
 impl Block {
-    pub(crate) fn validate(components: Vec<Component>) -> Result<Block, String> {
-        let mut name = None;
+    pub(crate) fn parse(string: &str) -> Result<Vec<Block>, String> {
+        enum State {
+            Content,
+            CommandFlag,
+            Command,
+            SkipNewline,
+            CancelledFlag,
+            InvalidCommand(String),
+        }
+        fn block_components_from_commands(commands: Vec<&str>) -> Result<Vec<Component>, String> {
+            match commands[0] {
+                END_BLOCK_COMMAND => Ok(vec![Component::Close]),
+                first => {
+                    if commands.len() < 2 {
+                        return Err(String::from("Not enough arguments"));
+                    }
+                    match first {
+                        NEW_BLOCK_COMMAND => {
+                            let name = String::from(commands[1]);
+                            let component = Component::Open { name };
+                            Ok(vec![component])
+                        }
+                        DEFINE_PARAMS_COMMAND => {
+                            let num_params = commands.len() - 1;
+                            let mut components = Vec::with_capacity(num_params);
+                            for i in 1..(1 + num_params) {
+                                let param_name = String::from(commands[i]);
+                                let attribute = Attribute::Value(param_name);
+                                let component = Component::Attribute(attribute);
+                                components.push(component);
+                            }
+                            Ok(components)
+                        }
+                        ENABLE_EXPORT_COMMAND => {
+                            let export_path = String::from(commands[1]);
+                            let attribute = Attribute::Export(export_path);
+                            let component = Component::Attribute(attribute);
+                            Ok(vec![component])
+                        }
+                        USE_BLOCK_COMMAND => {
+                            let block_name = argument_from_str(commands[1]);
+                            let parameters = match commands.len() {
+                                len if len > 2 => Some(
+                                    commands[2..]
+                                        .iter()
+                                        .map(|p| argument_from_str(*p))
+                                        .collect(),
+                                ),
+                                _ => None,
+                            };
+                            let element = Element::UseBlock {
+                                block_name,
+                                parameters,
+                            };
+                            let component = Component::Element(element);
+                            Ok(vec![component])
+                        }
+                        _ => Err(String::from("Unknown command")),
+                    }
+                }
+            }
+        }
+        fn argument_from_str(s: &str) -> Argument {
+            match s.strip_prefix('#') {
+                Some(s) => Argument::Value(String::from(s)),
+                None => Argument::Literal(String::from(s)),
+            }
+        }
+        fn flush(buffer: &mut String) -> String {
+            let contents = buffer.clone();
+            buffer.clear();
+            contents
+        }
+        fn push_to_state(buffer: &mut String, c: char, state: State) -> State {
+            buffer.push(c);
+            state
+        }
+        fn close_content(buffer: &mut String, components: &mut Vec<Component>) -> State {
+            if !buffer.is_empty() {
+                let content = flush(buffer);
+                let element = Element::Content(content);
+                let component = Component::Element(element);
+                components.push(component);
+            }
+            State::Command
+        }
+        fn close_command(buffer: &mut String, components: &mut Vec<Component>) -> State {
+            if !buffer.is_empty() {
+                let command = flush(buffer);
+                let commands: Vec<_> = command.split_whitespace().collect();
+                match block_components_from_commands(commands) {
+                    Ok(mut c) => components.append(&mut c),
+                    Err(err) => return State::InvalidCommand(err),
+                }
+            }
+            State::SkipNewline
+        }
+
+        let mut line = 1;
+        let mut col = 0;
+        let mut state = State::Content;
+        let mut buffer = String::with_capacity(string.len());
+        let mut components = Vec::new();
+        for c in string.chars() {
+            if c == '\n' {
+                line += 1;
+                col = 0;
+            }
+            col += 1;
+            state = match state {
+                State::Content => match c {
+                    COMMAND_FLAG => State::CommandFlag,
+                    _ => push_to_state(&mut buffer, c, State::Content),
+                },
+                State::CommandFlag => match c {
+                    COMMAND_START => close_content(&mut buffer, &mut components),
+                    COMMAND_FLAG => push_to_state(&mut buffer, c, State::CancelledFlag),
+                    _ => push_to_state(&mut buffer, c, State::Content),
+                },
+                State::Command => match c {
+                    COMMAND_END => close_command(&mut buffer, &mut components),
+                    _ => push_to_state(&mut buffer, c, State::Command),
+                },
+                State::SkipNewline => match c {
+                    '\n' => State::Content,
+                    _ => push_to_state(&mut buffer, c, State::Content),
+                },
+                State::CancelledFlag => match c {
+                    COMMAND_FLAG => push_to_state(&mut buffer, c, State::CancelledFlag),
+                    _ => push_to_state(&mut buffer, c, State::Content),
+                },
+                State::InvalidCommand(reason) => {
+                    return Err(format!("Invalid command ({}:{}): {}", line, col, reason));
+                }
+            };
+        }
+        close_content(&mut buffer, &mut components);
+
+        Block::build(components)
+    }
+    pub(crate) fn build(components: Vec<Component>) -> Result<Vec<Block>, String> {
+        let mut blocks = Vec::new();
+        let mut components = components.into_iter();
+        let name;
+        loop {
+            match components.next() {
+                Some(Component::Open { name: n }) => {
+                    name = n;
+                    break;
+                }
+                None => return Ok(blocks), // iterator is empty
+                _ => continue,
+            }
+        }
         let mut export = None;
         let mut values = Vec::new();
         let mut elements = Vec::new();
-        for component in components {
+        while let Some(component) = components.next() {
             match component {
+                Component::Open { name } => {
+                    return Err(format!("Illegally nested block '{}'", name))
+                }
                 Component::Attribute(attr) => match attr {
-                    Attribute::Name(n) => match name {
-                        None => name = Some(n),
-                        Some(_) => return Err("Multiple names defined".into()),
-                    },
                     Attribute::Export(e) => match export {
                         None => export = Some(e),
                         Some(_) => return Err("Multiple exports defined".into()),
@@ -62,21 +219,21 @@ impl Block {
                     },
                 },
                 Component::Element(e) => elements.push(e),
+                Component::Close => {
+                    break;
+                }
             }
         }
 
-        match name {
-            Some(name) => Ok(Block {
-                name,
-                export,
-                values,
-                elements,
-            }),
-            None => Err(format!(
-                "Missing required '{}' command",
-                DEFINE_BLOCK_COMMAND
-            )),
-        }
+        blocks.push(Block {
+            name,
+            export,
+            values,
+            elements,
+        });
+        blocks.append(&mut Block::build(components.collect())?);
+
+        Ok(blocks)
     }
     pub(crate) fn render(&self, library: &HashMap<String, Block>) -> Result<String, String> {
         self.render_with_params(library, None)
@@ -146,139 +303,5 @@ impl Block {
         }
 
         Ok(buffer)
-    }
-}
-
-enum ParserState {
-    Content,
-    CommandFlag,
-    Command,
-    SkipNewline,
-    CancelledFlag,
-    InvalidCommand(String),
-}
-impl std::str::FromStr for Block {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        fn block_components_from_commands(commands: Vec<&str>) -> Result<Vec<Component>, String> {
-            if commands.len() < 2 {
-                return Err(String::from("Not enough arguments"));
-            }
-            match commands[0] {
-                DEFINE_BLOCK_COMMAND => {
-                    let name = String::from(commands[1]);
-                    let attribute = Attribute::Name(name);
-                    let component = Component::Attribute(attribute);
-                    Ok(vec![component])
-                }
-                DEFINE_PARAMS_COMMAND => {
-                    let num_params = commands.len() - 1;
-                    let mut components = Vec::with_capacity(num_params);
-                    for i in 1..(1 + num_params) {
-                        let param_name = String::from(commands[i]);
-                        let attribute = Attribute::Value(param_name);
-                        let component = Component::Attribute(attribute);
-                        components.push(component);
-                    }
-                    Ok(components)
-                }
-                ENABLE_EXPORT_COMMAND => {
-                    let export_path = String::from(commands[1]);
-                    let attribute = Attribute::Export(export_path);
-                    let component = Component::Attribute(attribute);
-                    Ok(vec![component])
-                }
-                USE_BLOCK_COMMAND => {
-                    let block_name = argument_from_str(commands[1]);
-                    let parameters = match commands.len() {
-                        len if len > 2 => Some(
-                            commands[2..]
-                                .iter()
-                                .map(|p| argument_from_str(*p))
-                                .collect(),
-                        ),
-                        _ => None,
-                    };
-                    let element = Element::UseBlock {
-                        block_name,
-                        parameters,
-                    };
-                    let component = Component::Element(element);
-                    Ok(vec![component])
-                }
-                _ => Err(String::from("Unknown command")),
-            }
-        }
-        fn argument_from_str(s: &str) -> Argument {
-            match s.strip_prefix('#') {
-                Some(s) => Argument::Value(String::from(s)),
-                None => Argument::Literal(String::from(s)),
-            }
-        }
-        fn flush(buffer: &mut String) -> String {
-            let contents = buffer.clone();
-            buffer.clear();
-            contents
-        }
-        fn push_to_state(buffer: &mut String, c: char, state: ParserState) -> ParserState {
-            buffer.push(c);
-            state
-        }
-        fn close_content(buffer: &mut String, components: &mut Vec<Component>) -> ParserState {
-            if !buffer.is_empty() {
-                let content = flush(buffer);
-                let element = Element::Content(content);
-                let component = Component::Element(element);
-                components.push(component);
-            }
-            ParserState::Command
-        }
-        fn close_command(buffer: &mut String, components: &mut Vec<Component>) -> ParserState {
-            if !buffer.is_empty() {
-                let command = flush(buffer);
-                let commands: Vec<_> = command.split_whitespace().collect();
-                match block_components_from_commands(commands) {
-                    Ok(mut c) => components.append(&mut c),
-                    Err(err) => return ParserState::InvalidCommand(err),
-                }
-            }
-            ParserState::SkipNewline
-        }
-
-        let mut state = ParserState::Content;
-        let mut buffer = String::with_capacity(s.len());
-        let mut components = Vec::new();
-        for c in s.chars() {
-            state = match state {
-                ParserState::Content => match c {
-                    '!' => ParserState::CommandFlag,
-                    _ => push_to_state(&mut buffer, c, ParserState::Content),
-                },
-                ParserState::CommandFlag => match c {
-                    '{' => close_content(&mut buffer, &mut components),
-                    '!' => push_to_state(&mut buffer, c, ParserState::CancelledFlag),
-                    _ => push_to_state(&mut buffer, c, ParserState::Content),
-                },
-                ParserState::Command => match c {
-                    '}' => close_command(&mut buffer, &mut components),
-                    _ => push_to_state(&mut buffer, c, ParserState::Command),
-                },
-                ParserState::SkipNewline => match c {
-                    '\n' => ParserState::Content,
-                    _ => push_to_state(&mut buffer, c, ParserState::Content),
-                },
-                ParserState::CancelledFlag => match c {
-                    '!' => push_to_state(&mut buffer, c, ParserState::CancelledFlag),
-                    _ => push_to_state(&mut buffer, c, ParserState::Content),
-                },
-                ParserState::InvalidCommand(reason) => {
-                    return Err(format!("Invalid command: {}", reason));
-                }
-            };
-        }
-        close_content(&mut buffer, &mut components);
-
-        Block::validate(components)
     }
 }

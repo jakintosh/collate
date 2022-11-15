@@ -37,17 +37,17 @@ impl Library {
     }
 
     pub fn import_from_string(&mut self, string: &str) -> Result<(), String> {
-        let block = string.parse::<Block>()?;
+        for block in Block::parse(string)? {
+            if self.blocks.contains_key(&block.name) {
+                return Err(format!("Name taken '{}'", &block.name));
+            }
 
-        if self.blocks.contains_key(&block.name) {
-            return Err(format!("Name taken '{}'", &block.name));
+            if let Some(export) = &block.export {
+                self.exports.insert(block.name.clone(), export.into());
+            }
+
+            self.blocks.insert(block.name.clone(), block);
         }
-
-        if let Some(export) = &block.export {
-            self.exports.insert(block.name.clone(), export.into());
-        }
-
-        self.blocks.insert(block.name.clone(), block);
 
         Ok(())
     }
