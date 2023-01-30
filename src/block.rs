@@ -8,6 +8,7 @@ const NEW_BLOCK_COMMAND: &str = "n";
 const DEFINE_PARAMS_COMMAND: &str = "p";
 const ENABLE_EXPORT_COMMAND: &str = "x";
 const USE_BLOCK_COMMAND: &str = "u";
+const USE_BLOCK_INDENTED_COMMAND: &str = "ui";
 const END_BLOCK_COMMAND: &str = "e";
 
 #[derive(Clone)]
@@ -40,6 +41,7 @@ pub(crate) enum Argument {
 pub(crate) enum Element {
     Content(String),
     UseBlock {
+        indented: bool,
         block_name: Argument,
         parameters: Option<Vec<Argument>>,
     },
@@ -85,7 +87,12 @@ impl Block {
                             let component = Component::Attribute(attribute);
                             Ok(vec![component])
                         }
-                        USE_BLOCK_COMMAND => {
+                        USE_BLOCK_COMMAND | USE_BLOCK_INDENTED_COMMAND => {
+                            let indented = match first {
+                                USE_BLOCK_COMMAND => false,
+                                USE_BLOCK_INDENTED_COMMAND => true,
+                                _ => unreachable!(),
+                            };
                             let block_name = argument_from_str(commands[1]);
                             let parameters = match commands.len() {
                                 len if len > 2 => Some(
@@ -97,13 +104,14 @@ impl Block {
                                 _ => None,
                             };
                             let element = Element::UseBlock {
+                                indented,
                                 block_name,
                                 parameters,
                             };
                             let component = Component::Element(element);
                             Ok(vec![component])
                         }
-                        _ => Err(String::from("Unknown command")),
+                        cmd => Err(format!("Unknown command '{}'", cmd)),
                     }
                 }
             }
@@ -141,7 +149,12 @@ impl Block {
                     Err(err) => return State::InvalidCommand(err),
                 }
             }
-            State::SkipNewline
+
+            // don't skip newline after 'use' commands
+            match components.last() {
+                Some(Component::Element(Element::UseBlock { .. })) => State::Content,
+                _ => State::SkipNewline,
+            }
         }
 
         let mut line = 1;
@@ -220,6 +233,12 @@ impl Block {
                 },
                 Component::Element(e) => elements.push(e),
                 Component::Close => {
+                    // remove the final newline before the close command
+                    if let Some(Element::Content(last)) = elements.last_mut() {
+                        if last.ends_with('\n') {
+                            last.truncate(last.len() - 1);
+                        }
+                    }
                     break;
                 }
             }
@@ -236,12 +255,13 @@ impl Block {
         Ok(blocks)
     }
     pub(crate) fn render(&self, library: &HashMap<String, Block>) -> Result<String, String> {
-        self.render_with_params(library, None)
+        self.render_with_params(library, None, 0)
     }
     fn render_with_params(
         &self,
         library: &HashMap<String, Block>,
         params: Option<Vec<String>>,
+        indentation: usize,
     ) -> Result<String, String> {
         fn build_params(
             values: Vec<String>,
@@ -254,7 +274,7 @@ impl Block {
                     Ok(params)
                 }
                 false => Err(format!(
-                    "Expected {} parameter, received {}",
+                    "Expected {} parameter(s), received {}",
                     values.len(),
                     params.len()
                 )),
@@ -274,11 +294,48 @@ impl Block {
             Some(p) => build_params(self.values.clone(), p)?,
             None => HashMap::new(),
         };
+
+        let mut nested_indent = 0;
         let mut buffer = String::new();
         for element in &self.elements {
             let s = match element {
-                Element::Content(c) => c.to_owned(),
+                Element::Content(content) => {
+                    // get indentation of current line
+                    let split: Vec<_> = content.split('\n').collect();
+                    if split.len() > 1 {
+                        nested_indent = 0;
+                        let mut line = *split.last().unwrap();
+                        while let Some(line_stripped) = line.strip_prefix('\t') {
+                            line = line_stripped;
+                            nested_indent += 1;
+                        }
+                    }
+
+                    // apply indentation to the content
+                    let content = match indentation {
+                        0 => content.clone(),
+                        _ => {
+                            let mut new_content = String::new();
+                            for c in content.chars() {
+                                match c {
+                                    '\n' => {
+                                        new_content.push('\n');
+                                        for _ in 0..indentation {
+                                            new_content.push('\t');
+                                        }
+                                    }
+                                    _ => new_content.push(c),
+                                }
+                            }
+                            new_content
+                        }
+                    };
+
+                    // return the content string
+                    content
+                }
                 Element::UseBlock {
+                    indented,
                     block_name,
                     parameters,
                 } => {
@@ -295,8 +352,12 @@ impl Block {
                         }
                         None => None,
                     };
+                    let indentation = match indented {
+                        true => indentation + nested_indent,
+                        false => 0,
+                    };
 
-                    block.render_with_params(library, parameters)?
+                    block.render_with_params(library, parameters, indentation)?
                 }
             };
             buffer.push_str(&s);
