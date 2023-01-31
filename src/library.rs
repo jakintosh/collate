@@ -62,10 +62,10 @@ impl Library {
     }
 
     pub fn export_all(&self, dir: &PathBuf) -> Result<(), String> {
-        ensure_directory(dir)?;
         for (block_name, file_path) in &self.exports {
             let render = self.render(block_name)?;
             let path = build_path(&dir, &file_path);
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}", e))?;
             fs::write(&path, &render).map_err(|e| format!("{}: {}", block_name, e))?;
 
             println!(
@@ -105,15 +105,5 @@ fn get_filepaths_recursive(dir: &PathBuf) -> Vec<PathBuf> {
             .flat_map(|paths| paths.into_iter())
             .collect(),
         Err(_) => Vec::new(),
-    }
-}
-
-fn ensure_directory(path: &PathBuf) -> Result<(), String> {
-    match path.is_dir() {
-        true => Ok(()),
-        false => match fs::create_dir(path) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(format!("Couldn't create output directory: {}", err)),
-        },
     }
 }
