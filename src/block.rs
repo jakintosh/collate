@@ -109,6 +109,7 @@ impl Block {
                         commands.push(Command::Argument(Argument::Literal(buffer.clone())));
                         buffer.clear();
                     }
+                    c if c.is_whitespace() => continue,
                     c => {
                         buffer.push(c);
                         read_word(&mut buffer, &mut chars);
