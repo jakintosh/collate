@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::Chars};
 
 const COMMAND_FLAG: char = '^';
 const COMMAND_START: char = '|';
@@ -14,8 +14,8 @@ const END_BLOCK_COMMAND: &str = "e";
 #[derive(Clone)]
 pub(crate) struct Block {
     pub name: String,
+    pub param_names: Vec<String>,
     pub export: Option<String>,
-    pub values: Vec<String>,
     pub elements: Vec<Element>,
 }
 
@@ -28,13 +28,20 @@ pub(crate) enum Component {
 
 pub(crate) enum Attribute {
     Export(String),
-    Value(String),
+    ParamName(String),
 }
 
 #[derive(Clone)]
 pub(crate) enum Argument {
     Literal(String),
-    Value(String),
+    Name(String),
+    ParamName(String),
+}
+
+#[derive(Clone)]
+pub(crate) enum Parameter {
+    Name(String),
+    Literal(String),
 }
 
 #[derive(Clone)]
@@ -42,9 +49,15 @@ pub(crate) enum Element {
     Content(String),
     UseBlock {
         indented: bool,
-        block_name: Argument,
-        parameters: Option<Vec<Argument>>,
+        target: Argument,
+        arguments: Option<Vec<Argument>>,
     },
+}
+
+#[derive(Clone)]
+pub(crate) enum Command {
+    Flag(String),
+    Argument(Argument),
 }
 
 impl Block {
@@ -57,69 +70,136 @@ impl Block {
             CancelledFlag,
             InvalidCommand(String),
         }
-        fn block_components_from_commands(commands: Vec<&str>) -> Result<Vec<Component>, String> {
-            match commands[0] {
-                END_BLOCK_COMMAND => Ok(vec![Component::Close]),
-                first => {
-                    if commands.len() < 2 {
-                        return Err(String::from("Not enough arguments"));
-                    }
-                    match first {
-                        NEW_BLOCK_COMMAND => {
-                            let name = String::from(commands[1]);
-                            let component = Component::Open { name };
-                            Ok(vec![component])
-                        }
-                        DEFINE_PARAMS_COMMAND => {
-                            let num_params = commands.len() - 1;
-                            let mut components = Vec::with_capacity(num_params);
-                            for i in 1..(1 + num_params) {
-                                let param_name = String::from(commands[i]);
-                                let attribute = Attribute::Value(param_name);
-                                let component = Component::Attribute(attribute);
-                                components.push(component);
-                            }
-                            Ok(components)
-                        }
-                        ENABLE_EXPORT_COMMAND => {
-                            let export_path = String::from(commands[1]);
-                            let attribute = Attribute::Export(export_path);
-                            let component = Component::Attribute(attribute);
-                            Ok(vec![component])
-                        }
-                        USE_BLOCK_COMMAND | USE_BLOCK_INDENTED_COMMAND => {
-                            let indented = match first {
-                                USE_BLOCK_COMMAND => false,
-                                USE_BLOCK_INDENTED_COMMAND => true,
-                                _ => unreachable!(),
-                            };
-                            let block_name = argument_from_str(commands[1]);
-                            let parameters = match commands.len() {
-                                len if len > 2 => Some(
-                                    commands[2..]
-                                        .iter()
-                                        .map(|p| argument_from_str(*p))
-                                        .collect(),
-                                ),
-                                _ => None,
-                            };
-                            let element = Element::UseBlock {
-                                indented,
-                                block_name,
-                                parameters,
-                            };
-                            let component = Component::Element(element);
-                            Ok(vec![component])
-                        }
-                        cmd => Err(format!("Unknown command '{}'", cmd)),
+        fn commands_from_str(command_str: &str) -> Result<Vec<Command>, String> {
+            fn read_word(buffer: &mut String, chars: &mut Chars) {
+                while let Some(c) = chars.next() {
+                    match c {
+                        c if c.is_whitespace() => break,
+                        c => buffer.push(c),
                     }
                 }
             }
+            let mut chars = command_str.chars();
+            let mut commands = Vec::new();
+            let mut buffer = String::new();
+
+            // get flag
+            read_word(&mut buffer, &mut chars);
+            if buffer.is_empty() {
+                return Err(format!("Couldn't parse command flag from {}", command_str));
+            }
+            commands.push(Command::Flag(buffer.clone()));
+            buffer.clear();
+
+            // get arguments
+            while let Some(c) = chars.next() {
+                match c {
+                    '#' => {
+                        read_word(&mut buffer, &mut chars);
+                        commands.push(Command::Argument(Argument::ParamName(buffer.clone())));
+                        buffer.clear();
+                    }
+                    '(' => {
+                        while let Some(c) = chars.next() {
+                            match c {
+                                ')' => break,
+                                c => buffer.push(c),
+                            }
+                        }
+                        commands.push(Command::Argument(Argument::Literal(buffer.clone())));
+                        buffer.clear();
+                    }
+                    c => {
+                        buffer.push(c);
+                        read_word(&mut buffer, &mut chars);
+                        if !buffer.is_empty() {
+                            commands.push(Command::Argument(Argument::Name(buffer.clone())));
+                            buffer.clear();
+                        }
+                    }
+                }
+            }
+            Ok(commands)
         }
-        fn argument_from_str(s: &str) -> Argument {
-            match s.strip_prefix('#') {
-                Some(s) => Argument::Value(String::from(s)),
-                None => Argument::Literal(String::from(s)),
+        fn block_components_from_commands(
+            commands: Vec<Command>,
+        ) -> Result<Vec<Component>, String> {
+            let mut commands = commands.into_iter();
+            match commands.next() {
+                Some(Command::Flag(flag)) => match flag.as_str() {
+                    NEW_BLOCK_COMMAND => match commands.next() {
+                        Some(Command::Argument(Argument::Name(name))) => {
+                            Ok(vec![Component::Open { name }])
+                        }
+                        _ => Err(format!("New block command must provide a name")),
+                    },
+                    DEFINE_PARAMS_COMMAND => {
+                        let mut components = Vec::new();
+                        while let Some(next) = commands.next() {
+                            match next {
+                                Command::Argument(Argument::Name(name)) => {
+                                    let attribute = Attribute::ParamName(name);
+                                    let component = Component::Attribute(attribute);
+                                    components.push(component);
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "Define params can only handle Argument::Name commands"
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(components)
+                    }
+                    ENABLE_EXPORT_COMMAND => match commands.next() {
+                        Some(Command::Argument(Argument::Name(path))) => {
+                            let attribute = Attribute::Export(path);
+                            let component = Component::Attribute(attribute);
+                            Ok(vec![component])
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Enable Expost can only handle Argument::Name commands"
+                            ))
+                        }
+                    },
+                    USE_BLOCK_COMMAND | USE_BLOCK_INDENTED_COMMAND => {
+                        let indented = match flag.as_str() {
+                            USE_BLOCK_COMMAND => false,
+                            USE_BLOCK_INDENTED_COMMAND => true,
+                            _ => unreachable!(),
+                        };
+                        let target = match commands.next() {
+                            Some(Command::Argument(arg)) => arg,
+                            _ => {
+                                return Err(format!(
+                                    "Use block expects first command to be argument"
+                                ))
+                            }
+                        };
+                        let arguments: Vec<Argument> = commands
+                            .filter_map(|c| match c {
+                                Command::Argument(arg) => Some(arg),
+                                Command::Flag(_) => None,
+                            })
+                            .collect();
+                        let arguments = match arguments.is_empty() {
+                            false => Some(arguments),
+                            true => None,
+                        };
+                        let element = Element::UseBlock {
+                            indented,
+                            target,
+                            arguments,
+                        };
+                        let component = Component::Element(element);
+                        Ok(vec![component])
+                    }
+                    END_BLOCK_COMMAND => Ok(vec![Component::Close]),
+                    _ => Err(format!("Unknown Command::Flag '{}'", flag)),
+                },
+                Some(_) => Err(format!("First command must be a flag")),
+                None => Err(format!("Cannot build block from empty command list")),
             }
         }
         fn flush(buffer: &mut String) -> String {
@@ -143,7 +223,10 @@ impl Block {
         fn close_command(buffer: &mut String, components: &mut Vec<Component>) -> State {
             if !buffer.is_empty() {
                 let command = flush(buffer);
-                let commands: Vec<_> = command.split_whitespace().collect();
+                let commands = match commands_from_str(&command) {
+                    Ok(c) => c,
+                    Err(e) => panic!("{}", e),
+                };
                 match block_components_from_commands(commands) {
                     Ok(mut c) => components.append(&mut c),
                     Err(err) => return State::InvalidCommand(err),
@@ -210,11 +293,12 @@ impl Block {
                     break;
                 }
                 None => return Ok(blocks), // iterator is empty
-                _ => continue,
+                _ => continue,             // skip all possible components until we hit an open
             }
         }
+
         let mut export = None;
-        let mut values = Vec::new();
+        let mut param_names = Vec::new();
         let mut elements = Vec::new();
         while let Some(component) = components.next() {
             match component {
@@ -226,8 +310,8 @@ impl Block {
                         None => export = Some(e),
                         Some(_) => return Err("Multiple exports defined".into()),
                     },
-                    Attribute::Value(v) => match values.contains(&v) {
-                        false => values.push(v),
+                    Attribute::ParamName(v) => match param_names.contains(&v) {
+                        false => param_names.push(v),
                         true => return Err(format!("Duplicate value defined: {}", v)),
                     },
                 },
@@ -247,7 +331,7 @@ impl Block {
         blocks.push(Block {
             name,
             export,
-            values,
+            param_names,
             elements,
         });
         blocks.append(&mut Block::build(components.collect())?);
@@ -260,13 +344,13 @@ impl Block {
     fn render_with_params(
         &self,
         library: &HashMap<String, Block>,
-        params: Option<Vec<String>>,
+        params: Option<Vec<Parameter>>,
         indentation: usize,
     ) -> Result<String, String> {
         fn build_params(
             values: Vec<String>,
-            params: Vec<String>,
-        ) -> Result<HashMap<String, String>, String> {
+            params: Vec<Parameter>,
+        ) -> Result<HashMap<String, Parameter>, String> {
             match values.len() == params.len() {
                 true => {
                     let zip = values.into_iter().zip(params.into_iter());
@@ -280,18 +364,22 @@ impl Block {
                 )),
             }
         }
-        fn evaluate(arg: &Argument, params: &HashMap<String, String>) -> Result<String, String> {
+        fn evaluate(
+            arg: &Argument,
+            params: &HashMap<String, Parameter>,
+        ) -> Result<Parameter, String> {
             match arg {
-                Argument::Literal(s) => Ok(s.to_owned()),
-                Argument::Value(name) => match params.get(name) {
-                    Some(value) => Ok(value.clone()),
-                    None => Err(format!("Value named {} does not exist", name)),
+                Argument::Literal(lit) => Ok(Parameter::Literal(lit.to_owned())),
+                Argument::Name(name) => Ok(Parameter::Name(name.to_owned())),
+                Argument::ParamName(name) => match params.get(name) {
+                    Some(param) => Ok(param.clone()),
+                    None => Err(format!("Param named {} does not exist", name)),
                 },
             }
         }
 
         let params = match params {
-            Some(p) => build_params(self.values.clone(), p)?,
+            Some(p) => build_params(self.param_names.clone(), p)?,
             None => HashMap::new(),
         };
 
@@ -336,28 +424,33 @@ impl Block {
                 }
                 Element::UseBlock {
                     indented,
-                    block_name,
-                    parameters,
+                    target,
+                    arguments,
                 } => {
-                    let block_name = evaluate(block_name, &params)?;
-                    let block = match library.get(&block_name) {
-                        Some(b) => b,
-                        None => return Err(format!("Using unregisterd block '{}'", block_name)),
-                    };
-                    let parameters: Option<Vec<String>> = match parameters {
-                        Some(p) => {
-                            let evaluated_params: Result<Vec<String>, String> =
-                                p.iter().map(|p| evaluate(p, &params)).collect();
-                            Some(evaluated_params?)
-                        }
-                        None => None,
-                    };
-                    let indentation = match indented {
-                        true => indentation + nested_indent,
-                        false => 0,
-                    };
+                    let target_param = evaluate(target, &params)?;
+                    match target_param {
+                        Parameter::Literal(literal) => literal,
+                        Parameter::Name(name) => {
+                            let block = match library.get(&name) {
+                                Some(b) => b,
+                                None => return Err(format!("Using unregistered block '{}'", name)),
+                            };
+                            let parameters: Option<Vec<Parameter>> = match arguments {
+                                Some(p) => {
+                                    let evaluated_params: Result<Vec<Parameter>, String> =
+                                        p.iter().map(|p| evaluate(p, &params)).collect();
+                                    Some(evaluated_params?)
+                                }
+                                None => None,
+                            };
+                            let indentation = match indented {
+                                true => indentation + nested_indent,
+                                false => 0,
+                            };
 
-                    block.render_with_params(library, parameters, indentation)?
+                            block.render_with_params(library, parameters, indentation)?
+                        }
+                    }
                 }
             };
             buffer.push_str(&s);
