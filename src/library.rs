@@ -1,16 +1,18 @@
-use crate::block::Block;
+use crate::block::{Block, Export};
 use std::{collections::HashMap, fs, path::PathBuf};
 
 pub struct Library {
     blocks: HashMap<String, Block>,
-    exports: HashMap<String, PathBuf>,
+    block_exports: Vec<String>,
+    file_exports: HashMap<String, PathBuf>,
 }
 
 impl Library {
     pub fn new() -> Library {
         Library {
             blocks: HashMap::new(),
-            exports: HashMap::new(),
+            block_exports: Vec::new(),
+            file_exports: HashMap::new(),
         }
     }
 
@@ -43,7 +45,14 @@ impl Library {
             }
 
             if let Some(export) = &block.export {
-                self.exports.insert(block.name.clone(), export.into());
+                match export {
+                    Export::Block => {
+                        self.block_exports.push(block.name.clone());
+                    }
+                    Export::File(path) => {
+                        self.file_exports.insert(block.name.clone(), path.into());
+                    }
+                }
             }
 
             self.blocks.insert(block.name.clone(), block);
@@ -57,12 +66,31 @@ impl Library {
             Some(b) => b,
             None => return Err(format!("Library::render(): block '{}' not found", name)),
         };
-        let render = block.render(&self.blocks)?;
+        let render = block
+            .render(&self.blocks)
+            .map_err(|e| format!("Library::render(): block '{}': {}", name, e))?;
         Ok(render)
     }
 
-    pub fn export_all(&self, dir: &PathBuf) -> Result<(), String> {
-        for (block_name, file_path) in &self.exports {
+    pub fn export_all(&mut self, dir: &PathBuf) -> Result<(), String> {
+        loop {
+            // clone list of block exports and ingest
+            let block_exports = self.block_exports.clone();
+            self.block_exports.clear();
+            for block_name in block_exports {
+                let render = self.render(&block_name)?;
+                println!("Rendered {} to:\n\n{}", block_name, render);
+                self.import_from_string(&render)?;
+            }
+
+            // if we haven't made more block exports, exit
+            match self.block_exports.is_empty() {
+                true => break,
+                false => continue,
+            }
+        }
+
+        for (block_name, file_path) in &self.file_exports {
             let render = self.render(block_name)?;
             let path = build_path(&dir, &file_path);
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}", e))?;

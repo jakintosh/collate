@@ -77,7 +77,7 @@ fn main() {
             return;
         }
     };
-    let library = match collate::Library::new_from_dir(&source) {
+    let mut library = match collate::Library::new_from_dir(&source) {
         Ok(l) => l,
         Err(err) => {
             println!("Failed to build library: {}", err);

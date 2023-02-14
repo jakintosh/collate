@@ -6,7 +6,8 @@ const COMMAND_END: char = '|';
 
 const NEW_BLOCK_COMMAND: &str = "n";
 const DEFINE_PARAMS_COMMAND: &str = "p";
-const ENABLE_EXPORT_COMMAND: &str = "x";
+const FILE_EXPORT_COMMAND: &str = "x";
+const BLOCK_EXPORT_COMMAND: &str = "b";
 const USE_BLOCK_COMMAND: &str = "u";
 const USE_BLOCK_INDENTED_COMMAND: &str = "ui";
 const END_BLOCK_COMMAND: &str = "e";
@@ -15,7 +16,7 @@ const END_BLOCK_COMMAND: &str = "e";
 pub(crate) struct Block {
     pub name: String,
     pub param_names: Vec<String>,
-    pub export: Option<String>,
+    pub export: Option<Export>,
     pub elements: Vec<Element>,
 }
 
@@ -27,7 +28,7 @@ pub(crate) enum Component {
 }
 
 pub(crate) enum Attribute {
-    Export(String),
+    Export(Export),
     ParamName(String),
 }
 
@@ -42,6 +43,12 @@ pub(crate) enum Argument {
 pub(crate) enum Parameter {
     Name(String),
     Literal(String),
+}
+
+#[derive(Clone)]
+pub(crate) enum Export {
+    Block,
+    File(String),
 }
 
 #[derive(Clone)]
@@ -152,18 +159,21 @@ impl Block {
                         }
                         Ok(components)
                     }
-                    ENABLE_EXPORT_COMMAND => match commands.next() {
+                    FILE_EXPORT_COMMAND => match commands.next() {
                         Some(Command::Argument(Argument::Name(path))) => {
-                            let attribute = Attribute::Export(path);
+                            let attribute = Attribute::Export(Export::File(path));
                             let component = Component::Attribute(attribute);
                             Ok(vec![component])
                         }
                         _ => {
                             return Err(format!(
-                                "Enable Expost can only handle Argument::Name commands"
+                                "Enable Export can only handle Argument::Name commands"
                             ))
                         }
                     },
+                    BLOCK_EXPORT_COMMAND => {
+                        Ok(vec![Component::Attribute(Attribute::Export(Export::Block))])
+                    }
                     USE_BLOCK_COMMAND | USE_BLOCK_INDENTED_COMMAND => {
                         let indented = match flag.as_str() {
                             USE_BLOCK_COMMAND => false,
