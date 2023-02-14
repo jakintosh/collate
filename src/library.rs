@@ -32,7 +32,8 @@ impl Library {
             }
         }
 
-        let file = fs::read_to_string(&path).map_err(|e| format!("'{}': {}", display(path), e))?;
+        let file = fs::read_to_string(&path)
+            .map_err(|e| format!("File read error for '{}': {}", display(path), e))?;
 
         self.import_from_string(&file)
             .map_err(|e| format!("'{}': {}", display(path), e))
@@ -41,7 +42,7 @@ impl Library {
     pub fn import_from_string(&mut self, string: &str) -> Result<(), String> {
         for block in Block::parse(string)? {
             if self.blocks.contains_key(&block.name) {
-                return Err(format!("Name taken '{}'", &block.name));
+                return Err(format!("Import error: duplicate name '{}'", &block.name));
             }
 
             if let Some(export) = &block.export {
@@ -64,22 +65,21 @@ impl Library {
     pub fn render(&self, name: &str) -> Result<String, String> {
         let block = match self.blocks.get(name) {
             Some(b) => b,
-            None => return Err(format!("Library::render(): block '{}' not found", name)),
+            None => return Err(format!("Render Error: block '{}' not found", name)),
         };
         let render = block
             .render(&self.blocks)
-            .map_err(|e| format!("Library::render(): block '{}': {}", name, e))?;
+            .map_err(|e| format!("Render Error for block '{}': {}", name, e))?;
         Ok(render)
     }
 
-    pub fn export_all(&mut self, dir: &PathBuf) -> Result<(), String> {
+    pub fn export_all(&mut self, dir: &PathBuf, verbose: bool) -> Result<(), String> {
         loop {
             // clone list of block exports and ingest
             let block_exports = self.block_exports.clone();
             self.block_exports.clear();
             for block_name in block_exports {
                 let render = self.render(&block_name)?;
-                println!("Rendered {} to:\n\n{}", block_name, render);
                 self.import_from_string(&render)?;
             }
 
@@ -96,14 +96,15 @@ impl Library {
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}", e))?;
             fs::write(&path, &render).map_err(|e| format!("{}: {}", block_name, e))?;
 
-            println!(
-                "Exported block '{}' ({}B) to '{}'",
-                &block_name,
-                render.as_bytes().len(),
-                path.to_string_lossy()
-            );
+            if verbose {
+                println!(
+                    "Exported block '{}' ({}B) to '{}'",
+                    &block_name,
+                    render.as_bytes().len(),
+                    path.to_string_lossy()
+                );
+            }
         }
-
         Ok(())
     }
 }
